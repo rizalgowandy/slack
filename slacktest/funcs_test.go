@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestGenerateDefaultRTMInfo(t *testing.T) {
@@ -22,6 +23,7 @@ func TestGenerateDefaultRTMInfo(t *testing.T) {
 
 func TestCustomDefaultRTMInfo(t *testing.T) {
 	wsurl := "ws://127.0.0.1:5555/ws"
+	defaultInfo := generateRTMInfo(context.Background(), wsurl)
 	ctx := context.TODO()
 	ctx = context.WithValue(ctx, ServerBotIDContextKey, "U1234567890")
 	ctx = context.WithValue(ctx, ServerBotNameContextKey, "SomeTestBotThing")
@@ -30,6 +32,8 @@ func TestCustomDefaultRTMInfo(t *testing.T) {
 	assert.True(t, info.Ok)
 	assert.Equal(t, "U1234567890", info.User.ID)
 	assert.Equal(t, "SomeTestBotThing", info.User.Name)
+	assert.Equal(t, defaultBotID, defaultInfo.User.ID)
+	assert.Equal(t, defaultBotName, defaultInfo.User.Name)
 	assert.Equal(t, defaultTeamID, info.Team.ID)
 	assert.Equal(t, defaultTeamName, info.Team.Name)
 	assert.Equal(t, defaultTeamDomain, info.Team.Domain)
@@ -40,7 +44,7 @@ func TestGetHubMissingServerAddr(t *testing.T) {
 	assert.Nil(t, mc.seen, "seen should be nil")
 	assert.Nil(t, mc.sent, "sent should be nil")
 	assert.Nil(t, mc.posted, "posted should be nil")
-	assert.Error(t, err, "should return an error")
+	require.Error(t, err, "should return an error")
 	assert.EqualError(t, err, ErrPassedEmptyServerAddr.Error())
 }
 
@@ -49,12 +53,12 @@ func TestGetHubNoQueuesForServer(t *testing.T) {
 	assert.Nil(t, mc.seen, "seen should be nil")
 	assert.Nil(t, mc.sent, "sent should be nil")
 	assert.Nil(t, mc.posted, "posted should be nil")
-	assert.Error(t, err, "should return an error")
+	require.Error(t, err, "should return an error")
 	assert.EqualError(t, err, ErrNoQueuesRegisteredForServer.Error())
 }
 
 func TestUnableToAddToHub(t *testing.T) {
 	err := addServerToHub(&Server{}, &messageChannels{})
-	assert.Error(t, err, "should return and error")
+	require.Error(t, err, "should return and error")
 	assert.EqualError(t, err, ErrEmptyServerToHub.Error())
 }

@@ -1,16 +1,21 @@
 package slack_test
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
-	websocket "github.com/gorilla/websocket"
+	"github.com/gorilla/websocket"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/slack-go/slack"
 	"github.com/slack-go/slack/slacktest"
-	"github.com/stretchr/testify/assert"
 )
 
 const (
@@ -102,8 +107,8 @@ func TestRTMGoodbye(t *testing.T) {
 	select {
 	case <-done:
 		// magic numbers from empirical testing.
-		assert.Equal(t, connected <= 7, true)
-		assert.Equal(t, disconnected <= 12, true)
+		assert.LessOrEqual(t, connected, 7)
+		assert.LessOrEqual(t, disconnected, 12)
 	case <-time.After(5 * time.Second):
 		t.Error("timed out waiting for disconnect")
 		t.Fail()
@@ -159,8 +164,8 @@ func TestRTMDeadConnection(t *testing.T) {
 	select {
 	case <-done:
 		// magic numbers from empirical testing.
-		assert.Equal(t, connected <= 7, true)
-		assert.Equal(t, disconnected <= 7, true)
+		assert.LessOrEqual(t, connected, 7)
+		assert.LessOrEqual(t, disconnected, 7)
 	case <-time.After(5 * time.Second):
 		t.Error("timed out waiting for disconnect")
 		t.Fail()
@@ -168,44 +173,47 @@ func TestRTMDeadConnection(t *testing.T) {
 }
 
 func TestRTMDisconnect(t *testing.T) {
-	// actually connect to slack here w/ an invalid token
-	api := slack.New(testToken)
-	rtm := api.NewRTM()
-	go rtm.ManageConnection()
-
-	// Observe incoming messages.
-	done := make(chan struct{})
-	connectingReceived := false
-	disconnectedReceived := false
-
-	go func() {
-		for msg := range rtm.IncomingEvents {
-			switch ev := msg.Data.(type) {
-			case *slack.InvalidAuthEvent:
-				t.Log("invalid auth event received")
-				disconnectedReceived = true
-				close(done)
-			case *slack.ConnectingEvent:
-				connectingReceived = true
-			case *slack.ConnectedEvent:
-				t.Error("received connected events on an invalid connection")
-				t.Fail()
-			default:
-				t.Logf("discarded event of type '%s' with content '%#v'", msg.Type, ev)
-			}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/rtm.connect" {
+			t.Errorf("unexpected endpoint: %s", r.URL.Path)
 		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintln(w, `{"ok":false,"error":"invalid_auth"}`)
+	}))
+	t.Cleanup(server.Close)
+
+	api := slack.New(testToken, slack.OptionAPIURL(server.URL+"/"))
+	rtm := api.NewRTM()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		rtm.ManageConnection()
 	}()
+	t.Cleanup(func() {
+		_ = rtm.Disconnect()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("connection manager did not stop during cleanup")
+		}
+	})
+
+	timer := time.NewTimer(5 * time.Second)
+	defer timer.Stop()
+	for _, want := range []any{&slack.ConnectingEvent{}, &slack.InvalidAuthEvent{}} {
+		select {
+		case event := <-rtm.IncomingEvents:
+			require.IsType(t, want, event.Data)
+		case <-timer.C:
+			t.Fatalf("timed out waiting for %T", want)
+		}
+	}
 
 	select {
 	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Error("timed out waiting for disconnect")
-		t.Fail()
+	case <-timer.C:
+		t.Fatal("connection manager did not stop after invalid auth")
 	}
-
-	// Verify that all expected events have been received by the RTM client.
-	assert.True(t, connectingReceived, "Should have received a connecting event from the RTM instance.")
-	assert.True(t, disconnectedReceived, "Should have received a disconnected event from the RTM instance.")
 }
 
 func TestRTMConnectRateLimit(t *testing.T) {
@@ -249,7 +257,7 @@ func TestRTMConnectRateLimit(t *testing.T) {
 
 	previous := time.Duration(0)
 	for ev := range connectionFailure {
-		assert.True(t, previous <= ev.Backoff, fmt.Sprintf("backoff should increase during rate limits: %v <= %v", previous, ev.Backoff))
+		assert.LessOrEqual(t, previous, ev.Backoff, "backoff should increase during rate limits: %v <= %v", previous, ev.Backoff)
 		previous = ev.Backoff
 	}
 	testServer.Stop()
@@ -311,4 +319,62 @@ func TestRTMSingleConnect(t *testing.T) {
 	assert.True(t, connectingReceived, "Should have received a connecting event from the RTM instance.")
 	assert.True(t, connectedReceived, "Should have received a connected event from the RTM instance.")
 	assert.True(t, testMessageReceived, "Should have received a test message from the server.")
+}
+
+func TestRTMUnmappedError(t *testing.T) {
+	const unmappedEventName = "some_unknown_event"
+	// Set up the test server.
+	testServer := slacktest.NewTestServer()
+	go testServer.Start()
+
+	// Setup and start the RTM.
+	api := slack.New(testToken, slack.OptionAPIURL(testServer.GetAPIURL()))
+	rtm := api.NewRTM()
+	go rtm.ManageConnection()
+
+	// Observe incoming messages.
+	done := make(chan struct{})
+	var gotUnmarshallingError *slack.UnmarshallingErrorEvent
+	go func() {
+		for msg := range rtm.IncomingEvents {
+			switch ev := msg.Data.(type) {
+			case *slack.UnmarshallingErrorEvent:
+				gotUnmarshallingError = ev
+				rtm.Disconnect()
+			case *slack.DisconnectedEvent:
+				if ev.Intentional {
+					done <- struct{}{}
+					return
+				}
+			default:
+				t.Logf("Discarded event of type '%s' with content '%#v'", msg.Type, ev)
+			}
+		}
+	}()
+
+	// Send a message and sleep for some time to make sure the message can be processed client-side.
+	testServer.SendToWebsocket(fixSlackMessage(t, unmappedEventName))
+	<-done
+	testServer.Stop()
+
+	// Verify that we got the expected error with details
+	unmappedErr, ok := errors.AsType[*slack.UnmappedError](gotUnmarshallingError.ErrorObj)
+	require.True(t, ok)
+	assert.Equal(t, unmappedEventName, unmappedErr.EventType)
+}
+
+func fixSlackMessage(t *testing.T, eType string) string {
+	t.Helper()
+
+	m := slack.Message{
+		Msg: slack.Msg{
+			Type:      eType,
+			Text:      "Fixture Slack message",
+			Timestamp: fmt.Sprintf("%d", time.Now().Unix()),
+		},
+	}
+	msg, err := json.Marshal(m)
+	require.NoError(t, err)
+
+	return string(msg)
 }

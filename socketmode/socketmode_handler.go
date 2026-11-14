@@ -1,0 +1,372 @@
+package socketmode
+
+import (
+	"cmp"
+	"context"
+	"sync"
+
+	"github.com/slack-go/slack"
+	"github.com/slack-go/slack/slackevents"
+)
+
+// SocketmodeHandler routes Socket Mode events to registered handlers.
+//
+// Handler registration is not synchronized. Register all handlers sequentially
+// and finish configuring Client, the handler maps, and Default before calling
+// RunEventLoop or RunEventLoopContext. Do not register handlers or modify this
+// configuration while events are being dispatched, including from a handler.
+type SocketmodeHandler struct {
+	Client *Client
+
+	// level 1 - the most generic type of event
+	EventMap map[EventType][]SocketmodeHandlerFunc
+
+	// level 2 - Manage event by inner type
+	InteractionEventMap map[slack.InteractionType][]SocketmodeHandlerFunc
+	EventApiMap         map[slackevents.EventsAPIType][]SocketmodeHandlerFunc
+
+	// level 3 - the most user friendly way of managing event
+	InteractionBlockActionEventMap    map[string]SocketmodeHandlerFunc
+	InteractionShortcutEventMap       map[string]SocketmodeHandlerFunc
+	InteractionViewSubmissionEventMap map[string]SocketmodeHandlerFunc
+	InteractionViewClosedEventMap     map[string]SocketmodeHandlerFunc
+	SlashCommandMap                   map[string]SocketmodeHandlerFunc
+
+	Default SocketmodeHandlerFunc
+}
+
+// Handler have access to the event and socketmode client
+type SocketmodeHandlerFunc func(*Event, *Client)
+
+// Middleware accept SocketmodeHandlerFunc, and return SocketmodeHandlerFunc
+type SocketmodeMiddlewareFunc func(SocketmodeHandlerFunc) SocketmodeHandlerFunc
+
+// NewSocketmodeHandler creates a SocketmodeHandler. Register all handlers before
+// starting its event loop; concurrent registration is not supported.
+func NewSocketmodeHandler(client *Client) *SocketmodeHandler {
+	eventMap := make(map[EventType][]SocketmodeHandlerFunc)
+	interactionEventMap := make(map[slack.InteractionType][]SocketmodeHandlerFunc)
+	eventApiMap := make(map[slackevents.EventsAPIType][]SocketmodeHandlerFunc)
+
+	interactionBlockActionEventMap := make(map[string]SocketmodeHandlerFunc)
+	shortcutMap := make(map[string]SocketmodeHandlerFunc)
+	viewSubmissionMap := make(map[string]SocketmodeHandlerFunc)
+	viewClosedMap := make(map[string]SocketmodeHandlerFunc)
+	slackCommandMap := make(map[string]SocketmodeHandlerFunc)
+
+	return &SocketmodeHandler{
+		Client:                            client,
+		EventMap:                          eventMap,
+		EventApiMap:                       eventApiMap,
+		InteractionEventMap:               interactionEventMap,
+		InteractionBlockActionEventMap:    interactionBlockActionEventMap,
+		InteractionShortcutEventMap:       shortcutMap,
+		InteractionViewSubmissionEventMap: viewSubmissionMap,
+		InteractionViewClosedEventMap:     viewClosedMap,
+		SlashCommandMap:                   slackCommandMap,
+		Default: func(e *Event, c *Client) {
+			c.log.Printf("Unexpected event type received: %v\n", e.Type)
+		},
+	}
+}
+
+// Register a middleware or handler for an Event from socketmode
+// This most general entrypoint
+func (r *SocketmodeHandler) Handle(et EventType, f SocketmodeHandlerFunc) {
+	r.EventMap[et] = append(r.EventMap[et], f)
+}
+
+// Register a middleware or handler for an Interaction
+// There is several types of interactions, dedicated functions lets you better handle them
+// See
+// * HandleInteractionBlockAction
+// * HandleShortcut
+// * HandleViewSubmission
+// * HandleViewClosed
+func (r *SocketmodeHandler) HandleInteraction(et slack.InteractionType, f SocketmodeHandlerFunc) {
+	r.InteractionEventMap[et] = append(r.InteractionEventMap[et], f)
+}
+
+// Register a middleware or handler for a Block Action referenced by its ActionID
+func (r *SocketmodeHandler) HandleInteractionBlockAction(actionID string, f SocketmodeHandlerFunc) {
+	if actionID == "" {
+		panic("invalid command cannot be empty")
+	}
+	if f == nil {
+		panic("invalid handler cannot be nil")
+	}
+	if _, exist := r.InteractionBlockActionEventMap[actionID]; exist {
+		panic("multiple registrations for actionID" + actionID)
+	}
+	r.InteractionBlockActionEventMap[actionID] = f
+}
+
+// Register a middleware or handler for a Shortcut (global or message) referenced by its CallbackID
+func (r *SocketmodeHandler) HandleShortcut(callbackID string, f SocketmodeHandlerFunc) {
+	if callbackID == "" {
+		panic("invalid callbackID cannot be empty")
+	}
+	if f == nil {
+		panic("invalid handler cannot be nil")
+	}
+	if _, exist := r.InteractionShortcutEventMap[callbackID]; exist {
+		panic("multiple registrations for callbackID " + callbackID)
+	}
+	r.InteractionShortcutEventMap[callbackID] = f
+}
+
+// Register a middleware or handler for a View Submission referenced by its CallbackID
+func (r *SocketmodeHandler) HandleViewSubmission(callbackID string, f SocketmodeHandlerFunc) {
+	if callbackID == "" {
+		panic("invalid callbackID cannot be empty")
+	}
+	if f == nil {
+		panic("invalid handler cannot be nil")
+	}
+	if _, exist := r.InteractionViewSubmissionEventMap[callbackID]; exist {
+		panic("multiple registrations for callbackID " + callbackID)
+	}
+	r.InteractionViewSubmissionEventMap[callbackID] = f
+}
+
+// Register a middleware or handler for a View Closed event referenced by its CallbackID
+func (r *SocketmodeHandler) HandleViewClosed(callbackID string, f SocketmodeHandlerFunc) {
+	if callbackID == "" {
+		panic("invalid callbackID cannot be empty")
+	}
+	if f == nil {
+		panic("invalid handler cannot be nil")
+	}
+	if _, exist := r.InteractionViewClosedEventMap[callbackID]; exist {
+		panic("multiple registrations for callbackID " + callbackID)
+	}
+	r.InteractionViewClosedEventMap[callbackID] = f
+}
+
+// Register a middleware or handler for an Event (from slackevents)
+func (r *SocketmodeHandler) HandleEvents(et slackevents.EventsAPIType, f SocketmodeHandlerFunc) {
+	r.EventApiMap[et] = append(r.EventApiMap[et], f)
+}
+
+// Register a middleware or handler for a Slash Command
+func (r *SocketmodeHandler) HandleSlashCommand(command string, f SocketmodeHandlerFunc) {
+	if command == "" {
+		panic("invalid command cannot be empty")
+	}
+	if f == nil {
+		panic("invalid handler cannot be nil")
+	}
+	if _, exist := r.SlashCommandMap[command]; exist {
+		panic("multiple registrations for command" + command)
+	}
+	r.SlashCommandMap[command] = f
+}
+
+// Register a middleware or handler to use as a last resort
+func (r *SocketmodeHandler) HandleDefault(f SocketmodeHandlerFunc) {
+	r.Default = f
+}
+
+// RunEventLoop starts dispatching events and runs the Socket Mode client.
+// Register all handlers before calling this method. Registration and direct
+// changes to handler maps or Default are not supported while it is running.
+// Queued events are dispatched before returning; handlers run asynchronously.
+func (r *SocketmodeHandler) RunEventLoop() error {
+	return r.RunEventLoopContext(context.Background())
+}
+
+// RunEventLoopContext starts dispatching events and runs the Socket Mode client
+// until ctx is canceled or the client returns an error. Register all handlers
+// before calling this method. Registration and direct changes to handler maps or
+// Default are not supported while it is running.
+// Queued events are dispatched before returning; handlers run asynchronously.
+func (r *SocketmodeHandler) RunEventLoopContext(ctx context.Context) error {
+	ctx, cancel := context.WithCancel(ctx)
+	var wg sync.WaitGroup
+	wg.Go(func() { r.runEventLoop(ctx) })
+	defer func() {
+		cancel()
+		wg.Wait()
+
+		// The client has stopped producing events. Finish its queue after the
+		// dispatcher exits so cancellation cannot discard buffered events.
+		for {
+			select {
+			case event, ok := <-r.Client.Events:
+				if !ok {
+					return
+				}
+				r.dispatcher(event)
+			default:
+				return
+			}
+		}
+	}()
+
+	return r.Client.RunContext(ctx)
+}
+
+// Call the dispatcher for each incoming event
+func (r *SocketmodeHandler) runEventLoop(ctx context.Context) {
+	for {
+		select {
+		case evt, ok := <-r.Client.Events:
+			if !ok {
+				return
+			}
+
+			r.dispatcher(evt)
+
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+// DispatchEvent routes an event to the appropriate registered handlers. Handlers are
+// invoked asynchronously in goroutines, matching the behavior of RunEventLoop. This
+// method is useful for integration testing handler registrations without a WebSocket
+// connection.
+//
+// Complete handler registration before calling DispatchEvent. Registration and
+// changes to handler maps or Default must not overlap with dispatch.
+func (r *SocketmodeHandler) DispatchEvent(evt Event) {
+	var ishandled bool
+
+	// Some eventType can be further decomposed
+	switch evt.Type {
+	case EventTypeInteractive:
+		ishandled = r.interactionDispatcher(&evt)
+	case EventTypeEventsAPI:
+		ishandled = r.eventAPIDispatcher(&evt)
+	case EventTypeSlashCommand:
+		ishandled = r.slashCommandDispatcher(&evt)
+	default:
+		ishandled = r.socketmodeDispatcher(&evt)
+	}
+
+	if !ishandled {
+		go r.Default(&evt, r.Client)
+	}
+}
+
+func (r *SocketmodeHandler) dispatcher(evt Event) {
+	r.DispatchEvent(evt)
+}
+
+// Dispatch socketmode events to the registered middleware
+func (r *SocketmodeHandler) socketmodeDispatcher(evt *Event) bool {
+	if handlers, ok := r.EventMap[evt.Type]; ok {
+		// If we registered an event
+		for _, f := range handlers {
+			go f(evt, r.Client)
+		}
+
+		return true
+	}
+
+	return false
+}
+
+// Dispatch interactions to the registered middleware
+func (r *SocketmodeHandler) interactionDispatcher(evt *Event) bool {
+	interaction, ok := evt.Data.(slack.InteractionCallback)
+	if !ok {
+		r.Client.log.Printf("Ignored %+v\n", evt)
+		return false
+	}
+
+	// Level 1 - socketmode EventType
+	ishandled := r.socketmodeDispatcher(evt)
+
+	// Level 2 - interaction EventType
+	if handlers, ok := r.InteractionEventMap[interaction.Type]; ok {
+		// If we registered an event
+		for _, f := range handlers {
+			go f(evt, r.Client)
+		}
+
+		ishandled = true
+	}
+
+	// Level 3 - interaction with actionID or callbackID
+	switch interaction.Type {
+	case slack.InteractionTypeBlockActions:
+		blockActions := interaction.ActionCallback.BlockActions
+		// outmoded approach won`t be implemented
+		// attachments_actions := interaction.ActionCallback.AttachmentActions
+
+		for _, action := range blockActions {
+			if handler, ok := r.InteractionBlockActionEventMap[action.ActionID]; ok {
+				go handler(evt, r.Client)
+				ishandled = true
+			}
+		}
+	case slack.InteractionTypeShortcut, slack.InteractionTypeMessageAction:
+		if handler, ok := r.InteractionShortcutEventMap[interaction.CallbackID]; ok {
+			go handler(evt, r.Client)
+			ishandled = true
+		}
+	case slack.InteractionTypeViewSubmission:
+		if handler, ok := r.InteractionViewSubmissionEventMap[interaction.View.CallbackID]; ok {
+			go handler(evt, r.Client)
+			ishandled = true
+		}
+	case slack.InteractionTypeViewClosed:
+		if handler, ok := r.InteractionViewClosedEventMap[interaction.View.CallbackID]; ok {
+			go handler(evt, r.Client)
+			ishandled = true
+		}
+	}
+
+	return ishandled
+}
+
+// Dispatch eventAPI events to the registered middleware
+func (r *SocketmodeHandler) eventAPIDispatcher(evt *Event) bool {
+	eventsAPIEvent, ok := evt.Data.(slackevents.EventsAPIEvent)
+	if !ok {
+		r.Client.log.Printf("Ignored %+v\n", evt)
+		return false
+	}
+
+	innerEventType := slackevents.EventsAPIType(cmp.Or(eventsAPIEvent.InnerEvent.Type, eventsAPIEvent.Type))
+
+	// Level 1 - socketmode EventType
+	ishandled := r.socketmodeDispatcher(evt)
+
+	// Level 2 - EventAPI EventType
+	if handlers, ok := r.EventApiMap[innerEventType]; ok {
+		// If we registered an event
+		for _, f := range handlers {
+			go f(evt, r.Client)
+		}
+
+		ishandled = true
+	}
+
+	return ishandled
+}
+
+// Dispatch SlashCommands events to the registered middleware
+func (r *SocketmodeHandler) slashCommandDispatcher(evt *Event) bool {
+	slashCommandEvent, ok := evt.Data.(slack.SlashCommand)
+	if !ok {
+		r.Client.log.Printf("Ignored %+v\n", evt)
+		return false
+	}
+
+	// Level 1 - socketmode EventType
+	ishandled := r.socketmodeDispatcher(evt)
+
+	// Level 2 - SlackCommand by name
+	if handler, ok := r.SlashCommandMap[slashCommandEvent.Command]; ok {
+
+		go handler(evt, r.Client)
+
+		ishandled = true
+	}
+
+	return ishandled
+
+}

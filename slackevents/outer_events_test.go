@@ -5,6 +5,46 @@ import (
 	"testing"
 )
 
+func TestChallengeResponseMarshalJSON(t *testing.T) {
+	tests := []struct {
+		name     string
+		response any
+		want     string
+	}{
+		{
+			name:     "value",
+			response: ChallengeResponse{Challenge: "verification-token"},
+			want:     `{"challenge":"verification-token"}`,
+		},
+		{
+			name:     "pointer",
+			response: &ChallengeResponse{Challenge: "verification-token"},
+			want:     `{"challenge":"verification-token"}`,
+		},
+		{
+			name:     "empty challenge",
+			response: ChallengeResponse{},
+			want:     `{"challenge":""}`,
+		},
+		{
+			name:     "escaped challenge",
+			response: ChallengeResponse{Challenge: "quote: \" slash: \\ newline: \n"},
+			want:     `{"challenge":"quote: \" slash: \\ newline: \n"}`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := json.Marshal(tt.response)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(got) != tt.want {
+				t.Fatalf("json.Marshal() = %s, want %s", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestURLVerificationEvent(t *testing.T) {
 	rawE := []byte(`
 			{
@@ -33,12 +73,60 @@ func TestCallBackEvent(t *testing.T) {
 				"type": "event_callback",
 				"authed_users": [ "UXXXXXXX1" ],
 				"event_id": "Ev08MFMKH6",
+				"event_time": 1234567890,
+				"is_ext_shared_channel": true
+		}
+	`)
+	var cb EventsAPICallbackEvent
+	err := json.Unmarshal(rawE, &cb)
+	if err != nil {
+		t.Error(err)
+	}
+	if !cb.IsExtSharedChannel {
+		t.Errorf("expected IsExtSharedChannel to be true, got false")
+	}
+}
+
+func TestCallBackEventAuthorizations(t *testing.T) {
+	rawE := []byte(`
+			{
+				"token": "XXYYZZ",
+				"team_id": "TXXXXXXXX",
+				"api_app_id": "AXXXXXXXXX",
+				"event": {
+								"type": "app_context_changed",
+								"context": {}
+				},
+				"type": "event_callback",
+				"authorizations": [
+					{
+						"enterprise_id": null,
+						"team_id": "TXXXXXXXX",
+						"user_id": "UXXXXXXX1",
+						"is_bot": true,
+						"is_enterprise_install": false
+					}
+				],
+				"event_id": "Ev08MFMKH6",
 				"event_time": 1234567890
 		}
 	`)
-	err := json.Unmarshal(rawE, &EventsAPICallbackEvent{})
+	var cb EventsAPICallbackEvent
+	err := json.Unmarshal(rawE, &cb)
 	if err != nil {
-		t.Error(err)
+		t.Fatal(err)
+	}
+	if len(cb.Authorizations) != 1 {
+		t.Fatalf("expected 1 authorization, got %d", len(cb.Authorizations))
+	}
+	if cb.Authorizations[0].UserID != "UXXXXXXX1" {
+		t.Errorf("expected UserID UXXXXXXX1, got %q", cb.Authorizations[0].UserID)
+	}
+	if cb.Authorizations[0].TeamID != "TXXXXXXXX" {
+		t.Errorf("expected TeamID TXXXXXXXX, got %q", cb.Authorizations[0].TeamID)
+	}
+	if !cb.Authorizations[0].IsBot {
+		t.Errorf("expected IsBot to be true, got false")
 	}
 }
 

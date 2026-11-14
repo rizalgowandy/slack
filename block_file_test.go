@@ -8,8 +8,11 @@ import (
 
 func TestNewFileBlock(t *testing.T) {
 	fileBlock := NewFileBlock("test", "external_id", "source")
-	assert.Equal(t, string(fileBlock.Type), "file")
-	assert.Equal(t, fileBlock.BlockID, "test")
-	assert.Equal(t, fileBlock.ExternalID, "external_id")
-	assert.Equal(t, fileBlock.Source, "source")
+
+	assert.Equal(t, MBTFile, fileBlock.BlockType())
+	assert.Equal(t, "file", string(fileBlock.Type))
+	assert.Equal(t, "test", fileBlock.BlockID)
+	assert.Equal(t, "test", fileBlock.ID())
+	assert.Equal(t, "external_id", fileBlock.ExternalID)
+	assert.Equal(t, "source", fileBlock.Source)
 }

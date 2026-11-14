@@ -7,9 +7,6 @@ type GroupCreatedEvent struct {
 	Channel ChannelCreatedInfo `json:"channel"`
 }
 
-// XXX: Should we really do this? event.Group is probably nicer than event.Channel
-// even though the api returns "channel"
-
 // GroupMarkedEvent represents the Group marked event
 type GroupMarkedEvent ChannelInfoEvent
 
@@ -33,16 +30,17 @@ type GroupJoinedEvent ChannelJoinedEvent
 
 // GroupRenameEvent represents the Group rename event
 type GroupRenameEvent struct {
-	Type      string          `json:"type"`
-	Group     GroupRenameInfo `json:"channel"`
-	Timestamp string          `json:"ts"`
+	Type           string          `json:"type"`
+	Group          GroupRenameInfo `json:"channel"`
+	Timestamp      string          `json:"ts"`
+	EventTimestamp string          `json:"event_ts,omitempty"`
 }
 
 // GroupRenameInfo represents the group info related to the renamed group
 type GroupRenameInfo struct {
 	ID      string `json:"id"`
 	Name    string `json:"name"`
-	Created string `json:"created"`
+	Created int64  `json:"created"`
 }
 
 // GroupHistoryChangedEvent represents the Group history changed event

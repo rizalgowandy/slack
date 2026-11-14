@@ -6,8 +6,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/slack-go/slack"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/slack-go/slack"
 )
 
 func TestDefaultNewServer(t *testing.T) {
@@ -20,53 +22,52 @@ func TestDefaultNewServer(t *testing.T) {
 
 func TestCustomNewServer(t *testing.T) {
 	s := NewTestServer()
+	t.Cleanup(s.Stop)
 	s.SetBotName("BobsBot")
 	assert.Equal(t, "BobsBot", s.BotName)
 }
 
 func TestServerSendMessageToChannel(t *testing.T) {
 	s := NewTestServer()
-	go s.Start()
+	t.Cleanup(s.Stop)
+	s.Start()
 	s.SendMessageToChannel("C123456789", "some text")
-	time.Sleep(2 * time.Second)
 	assert.True(t, s.SawOutgoingMessage("some text"))
-	s.Stop()
 }
 
 func TestServerSendMessageToBot(t *testing.T) {
 	s := NewTestServer()
-	go s.Start()
+	t.Cleanup(s.Stop)
+	s.Start()
 	s.SendMessageToBot("C123456789", "some text")
 	expectedMsg := fmt.Sprintf("<@%s> %s", s.BotID, "some text")
-	time.Sleep(2 * time.Second)
 	assert.True(t, s.SawOutgoingMessage(expectedMsg))
-	s.Stop()
 }
 
 func TestBotDirectMessageBotHandler(t *testing.T) {
 	s := NewTestServer()
-	go s.Start()
+	t.Cleanup(s.Stop)
+	s.Start()
 	s.SendDirectMessageToBot("some text")
-	expectedMsg := fmt.Sprintf("some text")
-	time.Sleep(2 * time.Second)
+	expectedMsg := "some text"
 	assert.True(t, s.SawOutgoingMessage(expectedMsg))
-	s.Stop()
 }
 
 func TestGetSeenOutboundMessages(t *testing.T) {
-	maxWait := 5 * time.Second
 	s := NewTestServer()
-	go s.Start()
+	t.Cleanup(s.Stop)
+	s.Start()
 
 	s.SendMessageToChannel("foo", "should see this message")
-	time.Sleep(maxWait)
+
 	seenOutbound := s.GetSeenOutboundMessages()
-	assert.True(t, len(seenOutbound) > 0)
+	assert.Len(t, seenOutbound, 1)
+
 	hadMessage := false
 	for _, msg := range seenOutbound {
 		var m = slack.Message{}
 		jerr := json.Unmarshal([]byte(msg), &m)
-		assert.NoError(t, jerr, "messages should decode as slack.Message")
+		require.NoError(t, jerr, "messages should decode as slack.Message")
 		if m.Text == "should see this message" {
 			hadMessage = true
 			break
@@ -76,25 +77,27 @@ func TestGetSeenOutboundMessages(t *testing.T) {
 }
 
 func TestGetSeenInboundMessages(t *testing.T) {
-	maxWait := 5 * time.Second
 	s := NewTestServer()
-	go s.Start()
+	t.Cleanup(s.Stop)
+	s.Start()
 
-	api := slack.New("ABCDEFG", slack.OptionAPIURL(s.GetAPIURL()))
-	rtm := api.NewRTM()
-	go rtm.ManageConnection()
+	rtm := startTestRTM(t, s)
 	rtm.SendMessage(&slack.OutgoingMessage{
 		Channel: "foo",
 		Text:    "should see this inbound message",
 	})
-	time.Sleep(maxWait)
+	select {
+	case <-s.SeenFeed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("did not observe the inbound message")
+	}
 	seenInbound := s.GetSeenInboundMessages()
-	assert.True(t, len(seenInbound) > 0)
+	assert.NotEmpty(t, seenInbound)
 	hadMessage := false
 	for _, msg := range seenInbound {
 		var m = slack.Message{}
 		jerr := json.Unmarshal([]byte(msg), &m)
-		assert.NoError(t, jerr, "messages should decode as slack.Message")
+		require.NoError(t, jerr, "messages should decode as slack.Message")
 		if m.Text == "should see this inbound message" {
 			hadMessage = true
 			break
@@ -105,71 +108,37 @@ func TestGetSeenInboundMessages(t *testing.T) {
 }
 
 func TestSendChannelInvite(t *testing.T) {
-	maxWait := 5 * time.Second
 	s := NewTestServer()
-	go s.Start()
-	rtm := s.GetTestRTMInstance()
-	go rtm.ManageConnection()
-	evChan := make(chan (slack.Channel), 1)
-	go func() {
-		for msg := range rtm.IncomingEvents {
-			switch ev := msg.Data.(type) {
-			case *slack.ChannelJoinedEvent:
-				evChan <- ev.Channel
-			}
-		}
-	}()
+	t.Cleanup(s.Stop)
+	s.Start()
+	rtm := startTestRTM(t, s)
 	s.SendBotChannelInvite()
-	time.Sleep(maxWait)
-	select {
-	case m := <-evChan:
-		assert.Equal(t, "C024BE92L", m.ID, "channel id should match")
-		assert.Equal(t, "Fun times", m.Topic.Value, "topic should match")
-		s.Stop()
-		break
-	case <-time.After(maxWait):
-		assert.FailNow(t, "did not get channel joined event in time")
-	}
-
+	m := waitForRTMEvent[*slack.ChannelJoinedEvent](t, rtm)
+	assert.Equal(t, "C024BE92L", m.Channel.ID, "channel id should match")
+	assert.Equal(t, "Fun times", m.Channel.Topic.Value, "topic should match")
 }
 
 func TestSendGroupInvite(t *testing.T) {
-	maxWait := 5 * time.Second
 	s := NewTestServer()
-	go s.Start()
-	rtm := s.GetTestRTMInstance()
-	go rtm.ManageConnection()
-	evChan := make(chan (slack.Channel), 1)
-	go func() {
-		for msg := range rtm.IncomingEvents {
-			switch ev := msg.Data.(type) {
-			case *slack.GroupJoinedEvent:
-				evChan <- ev.Channel
-			}
-		}
-	}()
+	t.Cleanup(s.Stop)
+	s.Start()
+	rtm := startTestRTM(t, s)
 	s.SendBotGroupInvite()
-	time.Sleep(maxWait)
-	select {
-	case m := <-evChan:
-		assert.Equal(t, "G024BE91L", m.ID, "channel id should match")
-		assert.Equal(t, "Secret plans on hold", m.Topic.Value, "topic should match")
-		s.Stop()
-		break
-	case <-time.After(maxWait):
-		assert.FailNow(t, "did not get group joined event in time")
-	}
-
+	m := waitForRTMEvent[*slack.GroupJoinedEvent](t, rtm)
+	assert.Equal(t, "G024BE91L", m.Channel.ID, "channel id should match")
+	assert.Equal(t, "Secret plans on hold", m.Channel.Topic.Value, "topic should match")
 }
 
 func TestServerSawMessage(t *testing.T) {
 	s := NewTestServer()
-	go s.Start()
+	t.Cleanup(s.Stop)
+	s.Start()
 	assert.False(t, s.SawMessage("foo"), "should not have seen any message")
 }
 
 func TestServerSawOutgoingMessage(t *testing.T) {
 	s := NewTestServer()
-	go s.Start()
+	t.Cleanup(s.Stop)
+	s.Start()
 	assert.False(t, s.SawOutgoingMessage("foo"), "should not have seen any message")
 }

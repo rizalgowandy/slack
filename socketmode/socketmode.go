@@ -6,9 +6,9 @@ import (
 	"os"
 	"time"
 
-	"github.com/slack-go/slack"
-
 	"github.com/gorilla/websocket"
+
+	"github.com/slack-go/slack"
 )
 
 // EventType is the type of events that are emitted by scoketmode.Client.
@@ -49,9 +49,32 @@ const (
 
 	websocketDefaultTimeout = 10 * time.Second
 	defaultMaxPingInterval  = 30 * time.Second
+	defaultHandshakeTimeout = 45 * time.Second
+
+	// maxResponseSize is Slack's server-side limit for Socket Mode WebSocket response
+	// messages (20KB). Responses at or above this size on the wire are silently dropped
+	// by Slack — the WebSocket write succeeds but Slack ignores the payload. Empirically
+	// verified using both this library and Slack's official Node SDK
+	// (@slack/socket-mode).
+	//
+	// Note: gorilla/websocket's WriteJSON adds a trailing newline (via
+	// json.Encoder.Encode), so the on-wire size is json.Marshal(response) + 1. The
+	// pre-flight check in SendCtx uses >= maxResponseSize on the json.Marshal output,
+	// which is equivalent to > maxResponseSize on the wire minus the newline —
+	// conservative by exactly 1 byte.
+	maxResponseSize = 20 * 1024 // 20480 bytes
+
+	// defaultWriteBufferSize is the WebSocket write buffer size used when dialing Slack's
+	// Socket Mode endpoint. gorilla/websocket's default is 4096 bytes; messages exceeding
+	// the buffer are split into WebSocket continuation frames (I think). Slack's server
+	// does not reassemble continuation frames, causing silent message drops (this is my
+	// hypothesis from testing). We set this above Slack's 20KB response limit to ensure
+	// all valid messages are sent as single frames.
+	defaultWriteBufferSize = 32 * 1024
 )
 
-// Open calls the "apps.connections.open" endpoint and returns the provided URL and the full Info block.
+// Open calls the "apps.connections.open" endpoint and returns the provided URL and the
+// full Info block.
 //
 // To have a fully managed Websocket connection, use `New`, and call `Run()` on it.
 func (smc *Client) Open() (info *slack.SocketModeConnection, websocketURL string, err error) {
@@ -61,7 +84,8 @@ func (smc *Client) Open() (info *slack.SocketModeConnection, websocketURL string
 	return smc.StartSocketModeContext(ctx)
 }
 
-// OpenContext calls the "apps.connections.open" endpoint and returns the provided URL and the full Info block.
+// OpenContext calls the "apps.connections.open" endpoint and returns the provided URL and
+// the full Info block.
 //
 // To have a fully managed Websocket connection, use `New`, and call `Run()` on it.
 func (smc *Client) OpenContext(ctx context.Context) (info *slack.SocketModeConnection, websocketURL string, err error) {
@@ -79,6 +103,18 @@ func OptionDialer(d *websocket.Dialer) Option {
 	}
 }
 
+// OptionReadLimit sets the maximum incoming WebSocket message size in bytes.
+// The default is unlimited; a non-positive limit also disables the limit.
+// The limit applies to each message, including all fragments, on every connection.
+// Exceeding it closes the connection and triggers the normal reconnect handling.
+// With compression enabled through a custom dialer, the limit counts compressed
+// bytes and does not bound the size after decompression.
+func OptionReadLimit(limit int64) Option {
+	return func(smc *Client) {
+		smc.readLimit = limit
+	}
+}
+
 // OptionPingInterval determines how often we expect Slack to deliver WebSocket ping to us.
 // If no ping is delivered to us within this interval after the last ping, we assumes the WebSocket connection
 // is dead and needs to be reconnected.
@@ -88,7 +124,8 @@ func OptionPingInterval(d time.Duration) Option {
 	}
 }
 
-// OptionDebug enable debugging for the client
+// OptionDebug enables debugging for the client. Payload logs redact known
+// credential fields but still include message content and other user data.
 func OptionDebug(b bool) func(*Client) {
 	return func(c *Client) {
 		c.debug = b
@@ -118,4 +155,16 @@ func New(api *slack.Client, options ...Option) *Client {
 	}
 
 	return result
+}
+
+// sendEvent safely sends an event into the Clients Events channel
+// and blocks until buffer space is had, or the context is canceled.
+// This prevents deadlocking in the event that Events buffer is full,
+// other goroutines are waiting, and/or timing allows receivers to exit
+// before all senders are finished.
+func (smc *Client) sendEvent(ctx context.Context, event Event) {
+	select {
+	case smc.Events <- event:
+	case <-ctx.Done():
+	}
 }

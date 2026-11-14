@@ -8,7 +8,7 @@ import (
 )
 
 var (
-	ErrIncorrectResponse = errors.New("Response is incorrect")
+	ErrIncorrectResponse = errors.New("response is incorrect")
 )
 
 func getTeamInfo(rw http.ResponseWriter, r *http.Request) {
@@ -18,11 +18,11 @@ func getTeamInfo(rw http.ResponseWriter, r *http.Request) {
 			"name": "notalar",
 			"domain": "notalar",
 			"icon": {
-              "image_34": "https://slack.global.ssl.fastly.net/66f9/img/avatars-teams/ava_0002-34.png",
-              "image_44": "https://slack.global.ssl.fastly.net/66f9/img/avatars-teams/ava_0002-44.png",
-              "image_55": "https://slack.global.ssl.fastly.net/66f9/img/avatars-teams/ava_0002-55.png",
-              "image_default": true
-          }
+			  "image_34": "https://slack.global.ssl.fastly.net/66f9/img/avatars-teams/ava_0002-34.png",
+			  "image_44": "https://slack.global.ssl.fastly.net/66f9/img/avatars-teams/ava_0002-44.png",
+			  "image_55": "https://slack.global.ssl.fastly.net/66f9/img/avatars-teams/ava_0002-55.png",
+			  "image_default": true
+		  }
 		}}`)
 	rw.Write(response)
 }
@@ -54,6 +54,76 @@ func TestGetTeamInfo(t *testing.T) {
 	}
 }
 
+func getTeamProfile(rw http.ResponseWriter, r *http.Request) {
+	rw.Header().Set("Content-Type", "application/json")
+	response := []byte(`{
+		"ok":true,
+		"profile":{
+			 "fields":[
+					{
+						"id":"XXXD7KN555",
+						"ordering":2,
+						"field_name":"",
+						"label":"Skype",
+						"hint":"This will be displayed on your profile.",
+						"type":"text",
+						"possible_values":null,
+						"options":null,
+						"is_hidden":true
+				},
+				{
+					"id":"XXXGGE5AAN7",
+					"ordering":4,
+					"field_name":"title",
+					"label":"Title",
+					"hint":"",
+					"type":"text",
+					"possible_values":null,
+					"options":{
+						"is_protected":true,
+						"is_scim":true
+					},
+					"is_hidden":false
+					}
+				]
+			}
+		}`)
+
+	rw.Write(response)
+}
+
+func TestGetTeamProfile(t *testing.T) {
+	http.HandleFunc("/team.profile.get", getTeamProfile)
+
+	once.Do(startServer)
+	api := New("testing-token", OptionAPIURL("http://"+serverAddr+"/"))
+
+	teamProfile, err := api.GetTeamProfile()
+	if err != nil {
+		t.Errorf("Unexpected error: %s", err)
+		return
+	}
+
+	// t.Fatal refers to -> t.Errorf & return
+	if teamProfile.Fields[0].ID != "XXXD7KN555" {
+		t.Fatal(ErrIncorrectResponse)
+	}
+	if teamProfile.Fields[0].Label != "Skype" {
+		t.Fatal(ErrIncorrectResponse)
+	}
+
+	if teamProfile.Fields[1].ID != "XXXGGE5AAN7" {
+		t.Fatal(ErrIncorrectResponse)
+	}
+	if teamProfile.Fields[1].Label != "Title" {
+		t.Fatal(ErrIncorrectResponse)
+	}
+	if !teamProfile.Fields[1].Options["is_protected"] {
+		t.Fatal(ErrIncorrectResponse)
+	}
+
+}
+
 func getTeamAccessLogs(rw http.ResponseWriter, r *http.Request) {
 	rw.Header().Set("Content-Type", "application/json")
 	response := []byte(`{"ok": true, "logins": [{
@@ -65,11 +135,11 @@ func getTeamAccessLogs(rw http.ResponseWriter, r *http.Request) {
 			"ip": "127.0.0.1",
 			"user_agent": "SlackWeb/3abb0ae2380d48a9ae20c58cc624ebcd Mozilla/5.0 (Windows NT 6.1; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Slack/1.2.6 Chrome/45.0.2454.85 AtomShell/0.34.3 Safari/537.36 Slack_SSB/1.2.6",
 			"isp": "AT&T U-verse",
-                        "country": "US",
-                        "region": "IN"
-                        },
-                        {
-                        "user_id": "XUHWU0F",
+						"country": "US",
+						"region": "IN"
+						},
+						{
+						"user_id": "XUHWU0F",
 			"username": "ralaton",
 			"date_first": 1447395893,
 			"date_last": 1447395965,
@@ -77,15 +147,12 @@ func getTeamAccessLogs(rw http.ResponseWriter, r *http.Request) {
 			"ip": "192.168.0.1",
 			"user_agent": "com.tinyspeck.chatlyio/2.60 (iPhone; iOS 9.1; Scale/3.00)",
 			"isp": null,
-                        "country": null,
-                        "region": null
-                        }],
-                        "paging": {
-    			"count": 2,
-    			"total": 2,
-    			"page": 1,
-    			"pages": 1
-    			}
+						"country": null,
+						"region": null
+						}],
+						"response_metadata": {
+				"next_cursor": "dGVhbV9pZDo5MDAwMTcw"
+				}
   }`)
 	rw.Write(response)
 }
@@ -96,7 +163,10 @@ func TestGetAccessLogs(t *testing.T) {
 	once.Do(startServer)
 	api := New("testing-token", OptionAPIURL("http://"+serverAddr+"/"))
 
-	logins, paging, err := api.GetAccessLogs(NewAccessLogParameters())
+	params := NewAccessLogParameters()
+	params.Limit = 2
+	params.TeamID = "T12345"
+	logins, nextCursor, err := api.GetAccessLogs(params)
 	if err != nil {
 		t.Errorf("Unexpected error: %s", err)
 		return
@@ -152,17 +222,8 @@ func TestGetAccessLogs(t *testing.T) {
 		t.Fatal(ErrIncorrectResponse)
 	}
 
-	// test the paging
-	if paging.Count != 2 {
-		t.Fatal(ErrIncorrectResponse)
-	}
-	if paging.Total != 2 {
-		t.Fatal(ErrIncorrectResponse)
-	}
-	if paging.Page != 1 {
-		t.Fatal(ErrIncorrectResponse)
-	}
-	if paging.Pages != 1 {
-		t.Fatal(ErrIncorrectResponse)
+	// test the cursor
+	if nextCursor != "dGVhbV9pZDo5MDAwMTcw" {
+		t.Fatalf("Expected cursor %q, got %q", "dGVhbV9pZDo5MDAwMTcw", nextCursor)
 	}
 }

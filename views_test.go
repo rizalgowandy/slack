@@ -6,8 +6,10 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/slack-go/slack/internal/errorsx"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/slack-go/slack/internal/errorsx"
 )
 
 var dummySlackErr = errorsx.String("dummy_error_from_slack")
@@ -59,6 +61,21 @@ func TestSlack_OpenView(t *testing.T) {
 			rawResp:      "",
 			expectedResp: nil,
 			expectedErr:  ErrBlockIDNotUnique,
+		},
+		{
+			caseName:  "allow multiple blocks with empty block IDs",
+			triggerID: "dummy_trigger_id",
+			modalViewRequest: ModalViewRequest{
+				Blocks: Blocks{
+					BlockSet: []Block{
+						&InputBlock{BlockID: ""},
+						&InputBlock{BlockID: ""},
+					},
+				},
+			},
+			rawResp:      `{"ok": true, "view": {}}`,
+			expectedResp: &ViewResponse{SlackResponse{Ok: true}, View{}},
+			expectedErr:  nil,
 		},
 		{
 			caseName:         "raise an error from Slack API",
@@ -172,6 +189,10 @@ func TestSlack_OpenView(t *testing.T) {
 									Type: PlainTextType,
 									Text: "A simple label",
 								},
+								&TextBlockObject{
+									Type: PlainTextType,
+									Text: "A simple hint",
+								},
 								NewPlainTextInputBlockElement(
 									&TextBlockObject{
 										Type: PlainTextType,
@@ -203,9 +224,11 @@ func TestSlack_OpenView(t *testing.T) {
 			if c.expectedErr != nil && err != nil && c.expectedErr.Error() != err.Error() {
 				t.Fatalf("expected %s as error but got %s\n", c.expectedErr, err)
 			}
-			if resp == nil || c.expectedResp == nil {
+			if c.expectedResp == nil {
+				require.Nil(t, resp)
 				return
 			}
+			require.NotNil(t, resp)
 			if !reflect.DeepEqual(resp.ResponseMetadata.Messages, c.expectedResp.ResponseMetadata.Messages) {
 				t.Fatalf("expected:\n\t%v\n but got:\n\t%v\n", c.expectedResp.ResponseMetadata.Messages, resp.ResponseMetadata.Messages)
 			}
@@ -331,6 +354,10 @@ func TestSlack_View_PublishView(t *testing.T) {
 									Type: PlainTextType,
 									Text: "A simple label",
 								},
+								&TextBlockObject{
+									Type: PlainTextType,
+									Text: "A simple hint",
+								},
 								NewPlainTextInputBlockElement(
 									&TextBlockObject{
 										Type: PlainTextType,
@@ -362,9 +389,11 @@ func TestSlack_View_PublishView(t *testing.T) {
 			if c.expectedErr != nil && err != nil && c.expectedErr.Error() != err.Error() {
 				t.Fatalf("expected %s as error but got %s\n", c.expectedErr, err)
 			}
-			if resp == nil || c.expectedResp == nil {
+			if c.expectedResp == nil {
+				require.Nil(t, resp)
 				return
 			}
+			require.NotNil(t, resp)
 			if !reflect.DeepEqual(resp.ResponseMetadata.Messages, c.expectedResp.ResponseMetadata.Messages) {
 				t.Fatalf("expected:\n\t%v\n but got:\n\t%v\n", c.expectedResp.ResponseMetadata.Messages, resp.ResponseMetadata.Messages)
 			}
@@ -503,6 +532,10 @@ func TestSlack_PushView(t *testing.T) {
 									Type: PlainTextType,
 									Text: "A simple label",
 								},
+								&TextBlockObject{
+									Type: PlainTextType,
+									Text: "A simple hint",
+								},
 								NewPlainTextInputBlockElement(
 									&TextBlockObject{
 										Type: PlainTextType,
@@ -534,9 +567,11 @@ func TestSlack_PushView(t *testing.T) {
 			if c.expectedErr != nil && err != nil && c.expectedErr.Error() != err.Error() {
 				t.Fatalf("expected %s as error but got %s\n", c.expectedErr, err)
 			}
-			if resp == nil || c.expectedResp == nil {
+			if c.expectedResp == nil {
+				require.Nil(t, resp)
 				return
 			}
+			require.NotNil(t, resp)
 			if !reflect.DeepEqual(resp.ResponseMetadata.Messages, c.expectedResp.ResponseMetadata.Messages) {
 				t.Fatalf("expected:\n\t%v\n but got:\n\t%v\n", c.expectedResp.ResponseMetadata.Messages, resp.ResponseMetadata.Messages)
 			}
@@ -679,6 +714,10 @@ func TestSlack_UpdateView(t *testing.T) {
 									Type: PlainTextType,
 									Text: "A simple label",
 								},
+								&TextBlockObject{
+									Type: PlainTextType,
+									Text: "A simple hint",
+								},
 								NewPlainTextInputBlockElement(
 									&TextBlockObject{
 										Type: PlainTextType,
@@ -710,9 +749,11 @@ func TestSlack_UpdateView(t *testing.T) {
 			if c.expectedErr != nil && err != nil && c.expectedErr.Error() != err.Error() {
 				t.Fatalf("expected %s as error but got %s\n", c.expectedErr, err)
 			}
-			if resp == nil || c.expectedResp == nil {
+			if c.expectedResp == nil {
+				require.Nil(t, resp)
 				return
 			}
+			require.NotNil(t, resp)
 			if !reflect.DeepEqual(resp.ResponseMetadata.Messages, c.expectedResp.ResponseMetadata.Messages) {
 				t.Fatalf("expected:\n\t%v\n but got:\n\t%v\n", c.expectedResp.ResponseMetadata.Messages, resp.ResponseMetadata.Messages)
 			}
@@ -724,8 +765,10 @@ func TestSlack_UpdateView(t *testing.T) {
 }
 
 func assertViewSubmissionResponse(t *testing.T, resp *ViewSubmissionResponse, encoded string) {
+	t.Helper()
+
 	var decoded *ViewSubmissionResponse
-	assert.Nil(t, json.Unmarshal([]byte(encoded), &decoded))
+	require.NoError(t, json.Unmarshal([]byte(encoded), &decoded))
 	assert.Equal(t, decoded, resp)
 }
 
@@ -750,7 +793,8 @@ func TestSlack_UpdateViewSubmissionResponse(t *testing.T) {
 			"type": "modal",
 			"title": {
 				"type": "plain_text",
-				"text": "Test update view submission response"
+				"text": "Test update view submission response",
+				"emoji": false
 			},
 			"blocks": [
 				{
@@ -786,7 +830,8 @@ func TestSlack_PushViewSubmissionResponse(t *testing.T) {
 			"type": "modal",
 			"title": {
 				"type": "plain_text",
-				"text": "Test update view submission response"
+				"text": "Test update view submission response",
+				"emoji": false
 			},
 			"blocks": [
 				{
@@ -795,7 +840,8 @@ func TestSlack_PushViewSubmissionResponse(t *testing.T) {
 					"elements": [
 						{
 							"type": "plain_text",
-							"text": "Context text"
+							"text": "Context text",
+							"emoji": false
 						},
 						{
 							"type": "image",
@@ -813,16 +859,61 @@ func TestSlack_PushViewSubmissionResponse(t *testing.T) {
 
 func TestSlack_ErrorsViewSubmissionResponse(t *testing.T) {
 	resp := NewErrorsViewSubmissionResponse(map[string]string{
-		"input_text_action_id": "Please input a name that's at least 6 characters long",
-		"file_action_id":       "File exceeded size limit of 5 KB",
+		"name_input_block": "Please input a name that's at least 6 characters long",
+		"file_input_block": "File exceeded size limit of 5 KB",
 	})
 	rawResp := `{
 		"response_action": "errors",
 		"errors": {
-			"input_text_action_id": "Please input a name that's at least 6 characters long",
-			"file_action_id": "File exceeded size limit of 5 KB"
+			"name_input_block": "Please input a name that's at least 6 characters long",
+			"file_input_block": "File exceeded size limit of 5 KB"
 		}
 	}`
 
 	assertViewSubmissionResponse(t, resp, rawResp)
+}
+
+func TestPublishViewContextRequest_HashOmittedWhenNil(t *testing.T) {
+	tests := []struct {
+		name        string
+		hash        *string
+		wantHashKey bool
+		wantHashVal string
+	}{
+		{
+			name:        "nil hash omits field",
+			hash:        nil,
+			wantHashKey: false,
+		},
+		{
+			name:        "non-empty hash includes field",
+			hash:        new("156772938.1827394"),
+			wantHashKey: true,
+			wantHashVal: "156772938.1827394",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := PublishViewContextRequest{
+				UserID: "U12345",
+				View:   HomeTabViewRequest{Type: VTHomeTab},
+				Hash:   tt.hash,
+			}
+
+			data, err := json.Marshal(req)
+			require.NoError(t, err)
+
+			var decoded map[string]any
+			err = json.Unmarshal(data, &decoded)
+			require.NoError(t, err)
+
+			_, hasHash := decoded["hash"]
+			assert.Equal(t, tt.wantHashKey, hasHash, "hash key presence mismatch")
+
+			if tt.wantHashKey {
+				assert.Equal(t, tt.wantHashVal, decoded["hash"])
+			}
+		})
+	}
 }

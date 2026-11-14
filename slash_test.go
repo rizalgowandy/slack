@@ -1,6 +1,7 @@
 package slack
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -8,6 +9,31 @@ import (
 	"strings"
 	"testing"
 )
+
+func TestSlashCommandValidateToken(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		token  string
+		tokens []string
+		want   bool
+	}{
+		{name: "no configured tokens", token: "valid"},
+		{name: "matching token", token: "valid", tokens: []string{"valid"}, want: true},
+		{name: "first token matches", token: "valid", tokens: []string{"valid", "other"}, want: true},
+		{name: "last token matches", token: "valid", tokens: []string{"other", "valid"}, want: true},
+		{name: "same length mismatch", token: "valie", tokens: []string{"valid"}},
+		{name: "different length mismatch", token: "valid-extra", tokens: []string{"valid"}},
+		{name: "missing request token", tokens: []string{"valid"}},
+		{name: "empty configured token", tokens: []string{""}, want: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			command := SlashCommand{Token: test.token}
+			if got := command.ValidateToken(test.tokens...); got != test.want {
+				t.Fatalf("got %t, want %t", got, test.want)
+			}
+		})
+	}
+}
 
 func TestSlash_ServeHTTP(t *testing.T) {
 	once.Do(startServer)
@@ -97,5 +123,94 @@ func TestSlash_ServeHTTP(t *testing.T) {
 			t.Errorf("%d: Got params %#v, want %#v", i, slashCommand, test.wantParams)
 		}
 		resp.Body.Close()
+	}
+}
+
+func TestSlash_UnmarshalJSON(t *testing.T) {
+	tests := []struct {
+		body                    string
+		wantIsEnterpriseInstall bool
+		wantToken               string
+		wantUnmarshalError      string
+	}{
+		{
+			body:                    `{"token":"blahblah","is_enterprise_install":"false"}`,
+			wantIsEnterpriseInstall: false,
+			wantToken:               "blahblah",
+			wantUnmarshalError:      "",
+		},
+		{
+			body:                    `{"token":"blahblah","is_enterprise_install":false}`,
+			wantIsEnterpriseInstall: false,
+			wantToken:               "blahblah",
+			wantUnmarshalError:      "",
+		},
+		{
+			body:                    `{"token":"blahblah","is_enterprise_install":"true"}`,
+			wantIsEnterpriseInstall: true,
+			wantToken:               "blahblah",
+			wantUnmarshalError:      "",
+		},
+		{
+			body:                    `{"token":"blahblah","is_enterprise_install":true}`,
+			wantIsEnterpriseInstall: true,
+			wantToken:               "blahblah",
+			wantUnmarshalError:      "",
+		},
+		{
+			body:      `{"token":"blahblah"}`,
+			wantToken: "blahblah",
+		},
+		{
+			body:      `{"token":"blahblah","is_enterprise_install":null}`,
+			wantToken: "blahblah",
+		},
+		{
+			body:               `{"token":"blahblah","is_enterprise_install":42}`,
+			wantUnmarshalError: "wrong data type for is_enterprise_install: float64",
+		},
+		{
+			body:               `{"token":"blahblah","is_enterprise_install":"unconvertable to bool"}`,
+			wantUnmarshalError: "parsing boolean for is_enterprise_install: strconv.ParseBool: parsing \"unconvertable to bool\": invalid syntax",
+		},
+	}
+
+	for i, test := range tests {
+		var result SlashCommand
+
+		err := json.Unmarshal([]byte(test.body), &result)
+		if err != nil {
+			if err.Error() != test.wantUnmarshalError {
+				t.Errorf("%d: Got error %v, want error %q", i, err, test.wantUnmarshalError)
+			}
+			continue
+		}
+
+		if test.wantUnmarshalError != "" {
+			t.Errorf("%d: Got no error, want error %q", i, test.wantUnmarshalError)
+			continue
+		}
+
+		if result.IsEnterpriseInstall != test.wantIsEnterpriseInstall {
+			t.Errorf("%d: Got IsEnterpriseInstall %v, want IsEnterpriseInstall %v", i, result.IsEnterpriseInstall, test.wantIsEnterpriseInstall)
+		}
+
+		if result.Token != test.wantToken {
+			t.Errorf("%d: Got Token %v, want Token %v", i, result.Token, test.wantToken)
+		}
+	}
+}
+
+func TestSlash_UnmarshalJSONAbsentEnterpriseInstallPreservesValue(t *testing.T) {
+	for _, body := range []string{`{}`, `{"is_enterprise_install":null}`} {
+		t.Run(body, func(t *testing.T) {
+			command := SlashCommand{IsEnterpriseInstall: true}
+			if err := json.Unmarshal([]byte(body), &command); err != nil {
+				t.Fatal(err)
+			}
+			if !command.IsEnterpriseInstall {
+				t.Fatal("absent or null boolean should leave an existing value unchanged")
+			}
+		})
 	}
 }

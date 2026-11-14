@@ -2,9 +2,35 @@ package slack
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
+	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
+
+func TestListEventAuthorizationsDeliversWarnings(t *testing.T) {
+	var warnings int
+	api := New("test-token",
+		OptionAppLevelToken("test-app-token"),
+		OptionHTTPClient(httpClientFunc(func(r *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader(`{"ok":true,"warning":"test_warning","authorizations":[{"team_id":"T1","user_id":"U1"}]}`)),
+			}, nil
+		})),
+		OptionOnWarning(func(path string, request any, warning *Warning) {
+			warnings++
+			require.Equal(t, "apps.event.authorizations.list", path)
+		}),
+	)
+	authorizations, err := api.ListEventAuthorizationsContext(t.Context(), "event-context")
+	require.NoError(t, err)
+	require.Len(t, authorizations, 1)
+	require.Equal(t, "U1", authorizations[0].UserID)
+	require.Equal(t, 1, warnings)
+}
 
 func TestListEventAuthorizations(t *testing.T) {
 	http.HandleFunc("/apps.event.authorizations.list", testListEventAuthorizationsHandler)
@@ -14,11 +40,12 @@ func TestListEventAuthorizations(t *testing.T) {
 
 	authorizations, err := api.ListEventAuthorizations("1-message-T012345678-DR12345678")
 
-	if err != nil {
+	switch {
+	case err != nil:
 		t.Errorf("Failed, but should have succeeded")
-	} else if len(authorizations) != 1 {
+	case len(authorizations) != 1:
 		t.Errorf("Didn't get 1 authorization")
-	} else if authorizations[0].UserID != "U123456789" {
+	case authorizations[0].UserID != "U123456789":
 		t.Errorf("User ID is wrong")
 	}
 }

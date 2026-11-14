@@ -13,9 +13,9 @@ type logger interface {
 // ilogger represents the internal logging api we use.
 type ilogger interface {
 	logger
-	Print(...interface{})
-	Printf(string, ...interface{})
-	Println(...interface{})
+	Print(...any)
+	Printf(string, ...any)
+	Println(...any)
 }
 
 // internalLog implements the additional methods used by our internal logging.
@@ -24,28 +24,28 @@ type internalLog struct {
 }
 
 // Println replicates the behaviour of the standard logger.
-func (t internalLog) Println(v ...interface{}) {
-	t.Output(2, fmt.Sprintln(v...))
+func (t internalLog) Println(v ...any) {
+	_ = t.Output(2, fmt.Sprintln(v...))
 }
 
 // Printf replicates the behaviour of the standard logger.
-func (t internalLog) Printf(format string, v ...interface{}) {
-	t.Output(2, fmt.Sprintf(format, v...))
+func (t internalLog) Printf(format string, v ...any) {
+	_ = t.Output(2, fmt.Sprintf(format, v...))
 }
 
 // Print replicates the behaviour of the standard logger.
-func (t internalLog) Print(v ...interface{}) {
-	t.Output(2, fmt.Sprint(v...))
+func (t internalLog) Print(v ...any) {
+	_ = t.Output(2, fmt.Sprint(v...))
 }
 
-func (smc *Client) Debugf(format string, v ...interface{}) {
+func (smc *Client) Debugf(format string, v ...any) {
 	if smc.debug {
-		smc.log.Output(2, fmt.Sprintf(format, v...))
+		_ = smc.log.Output(2, fmt.Sprintf(format, v...))
 	}
 }
 
-func (smc *Client) Debugln(v ...interface{}) {
+func (smc *Client) Debugln(v ...any) {
 	if smc.debug {
-		smc.log.Output(2, fmt.Sprintln(v...))
+		_ = smc.log.Output(2, fmt.Sprintln(v...))
 	}
 }

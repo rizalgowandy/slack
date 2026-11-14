@@ -2,9 +2,13 @@ package slack
 
 import (
 	"encoding/json"
+	"net/http"
+	"net/url"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 const (
@@ -51,7 +55,8 @@ const (
 			"type": "modal",
 			"title": {
 				"type": "plain_text",
-				"text": "launch project"
+				"text": "launch project",
+				"emoji": false
 			},
 			"blocks": [{
 				"type": "section",
@@ -65,10 +70,12 @@ const (
 				  "initial_date": "1990-04-28",
 				  "placeholder": {
 					"type": "plain_text",
-					"text": "Select a date"
+					"text": "Select a date",
+				  	"emoji": false
 				  }
 				}
-			}]
+			}],
+			"app_installed_team_id": "T1ABCD2E12"
 		},
 		"api_app_id": "A123ABC",
 		"is_cleared": false
@@ -91,7 +98,8 @@ const (
 			"type": "modal",
 			"title": {
 				"type": "plain_text",
-				"text": "meal choice"
+				"text": "meal choice",
+				"emoji": false
 			},
 			"blocks": [
 				{
@@ -99,7 +107,8 @@ const (
 					"block_id": "multi-line",
 					"label": {
 						"type": "plain_text",
-						"text": "dietary restrictions"
+						"text": "dietary restrictions",
+				  		"emoji": false
 					},
 					"element": {
 						"type": "plain_text_input",
@@ -112,7 +121,8 @@ const (
 					"block_id": "target_channel",
 					"label": {
 						"type": "plain_text",
-						"text": "Select a channel to post the result on"
+						"text": "Select a channel to post the result on",
+						"emoji": false
 					},
 					"element": {
 						"type": "conversations_select",
@@ -135,9 +145,23 @@ const (
 							"type": "conversations_select",
 							"value": "C1AB2C3DE"
 						}
+					},
+          "some_datetime": {
+            "value": {
+              "type": "datetimepicker",
+              "selected_date_time": null
+            }
+          },
+					"some_timepicker": {
+						"value": {
+							"type": "timepicker",
+							"timezone": "Europe/Berlin",
+							"initial_time": "12:00"
+						}
 					}
 				}
-			}
+			},
+			"app_installed_team_id": "T1ABCD2E12"
 		},
 		"hash": "156663117.cd33ad1f",
 		"response_urls": [
@@ -152,8 +176,10 @@ const (
 )
 
 func assertInteractionCallback(t *testing.T, callback InteractionCallback, encoded string) {
+	t.Helper()
+
 	var decoded InteractionCallback
-	assert.Nil(t, json.Unmarshal([]byte(encoded), &decoded))
+	require.NoError(t, json.Unmarshal([]byte(encoded), &decoded))
 	assert.Equal(t, decoded, callback)
 }
 
@@ -196,6 +222,141 @@ func TestActionCallback(t *testing.T) {
 	assertInteractionCallback(t, InteractionCallback{}, actionCallback)
 }
 
+func TestActionCallbacksUnmarshalReuse(t *testing.T) {
+	const original = `[{"name":"old attachment","type":"button","value":"old"},{"block_id":"old block","action_id":"old action","type":"button","value":"old"}]`
+	for _, input := range []string{
+		`[{"name":"new attachment","type":"button","value":"new"}]`,
+		`[{"block_id":"new block","action_id":"new action","type":"button","value":"new"}]`,
+		`[{"name":"new attachment","type":"button","value":"new"},{"block_id":"new block","action_id":"new action","type":"button","value":"new"}]`,
+		`[]`,
+		`null`,
+	} {
+		t.Run(input, func(t *testing.T) {
+			var reused, fresh ActionCallbacks
+			require.NoError(t, json.Unmarshal([]byte(original), &reused))
+			require.NoError(t, json.Unmarshal([]byte(input), &reused))
+			require.NoError(t, json.Unmarshal([]byte(input), &fresh))
+			require.Equal(t, fresh, reused)
+			if input == `[]` || input == `null` {
+				require.Equal(t, ActionCallbacks{}, reused)
+				encoded, err := json.Marshal(reused)
+				require.NoError(t, err)
+				require.JSONEq(t, `[]`, string(encoded))
+			}
+		})
+	}
+}
+
+func TestActionCallbacksUnmarshalInvalidInput(t *testing.T) {
+	for _, input := range []string{
+		`[`, `42`, `[42]`,
+		`[{"name":42}]`,
+		`[{"block_id":"new block","action_id":42}]`,
+		`[{"name":"valid first action"},{"block_id":"new block","action_id":42}]`,
+	} {
+		t.Run(input, func(t *testing.T) {
+			var actions ActionCallbacks
+			require.NoError(t, json.Unmarshal([]byte(`[{"name":"old","type":"button","value":"old"}]`), &actions))
+			require.Error(t, json.Unmarshal([]byte(input), &actions))
+		})
+	}
+}
+
+func TestActionCallbacksMarshalJSON(t *testing.T) {
+	type wireAction struct {
+		Name     string `json:"name"`
+		ActionID string `json:"action_id"`
+		Value    string `json:"value"`
+	}
+	attachment := &AttachmentAction{Name: "approve", Value: "<go> & \"Slack\"\n世界"}
+	block := &BlockAction{ActionID: "select", Value: "C123"}
+	wantAttachment := &wireAction{Name: attachment.Name, Value: attachment.Value}
+	wantBlock := &wireAction{ActionID: block.ActionID, Value: block.Value}
+	for _, tt := range []struct {
+		name     string
+		callback ActionCallbacks
+		want     []*wireAction
+	}{
+		{"nil slices", ActionCallbacks{}, []*wireAction{}},
+		{"empty slices", ActionCallbacks{AttachmentActions: []*AttachmentAction{}, BlockActions: []*BlockAction{}}, []*wireAction{}},
+		{
+			"attachments",
+			ActionCallbacks{AttachmentActions: []*AttachmentAction{attachment, nil, attachment}},
+			[]*wireAction{wantAttachment, nil, wantAttachment},
+		},
+		{
+			"blocks",
+			ActionCallbacks{BlockActions: []*BlockAction{block, nil, block}},
+			[]*wireAction{wantBlock, nil, wantBlock},
+		},
+		{
+			"mixed",
+			ActionCallbacks{AttachmentActions: []*AttachmentAction{attachment, nil}, BlockActions: []*BlockAction{nil, block}},
+			[]*wireAction{wantAttachment, nil, nil, wantBlock},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			data, err := json.Marshal(tt.callback)
+			require.NoError(t, err)
+			var actions []*wireAction
+			require.NoError(t, json.Unmarshal(data, &actions))
+			assert.Equal(t, tt.want, actions)
+		})
+	}
+}
+
+func TestActionCallbacksMarshalJSONError(t *testing.T) {
+	invalid := &BlockAction{RichTextValue: RichTextBlock{Elements: []RichTextElement{
+		RichTextUnknown{Raw: "{"},
+	}}}
+	for _, attachments := range [][]*AttachmentAction{nil, {{Name: "approve"}}} {
+		callback := ActionCallbacks{
+			AttachmentActions: attachments,
+			BlockActions:      []*BlockAction{invalid},
+		}
+		data, err := callback.MarshalJSON()
+		require.Error(t, err)
+		assert.Nil(t, data)
+	}
+}
+
+func TestInteractionCallbackMarshalJSONState(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		callback InteractionCallback
+		want     string
+	}{
+		{"omitted", InteractionCallback{}, ""},
+		{"block missing", InteractionCallback{Type: InteractionTypeBlockActions}, `{}`},
+		{
+			"block nil values",
+			InteractionCallback{Type: InteractionTypeBlockActions, BlockActionState: &BlockActionStates{}},
+			`{"values":null}`,
+		},
+		{
+			"block empty values",
+			InteractionCallback{Type: InteractionTypeBlockActions, BlockActionState: &BlockActionStates{Values: map[string]map[string]BlockAction{}}},
+			`{"values":{}}`,
+		},
+		{
+			"dialog",
+			InteractionCallback{Type: InteractionTypeDialogSubmission, DialogSubmissionCallback: DialogSubmissionCallback{State: `{"id":9007199254740993}`}},
+			`{"id":9007199254740993}`,
+		},
+		{"other", InteractionCallback{RawState: json.RawMessage(`{"id":9007199254740993}`)}, `{"id":9007199254740993}`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			rawState := string(tt.callback.RawState)
+			data, err := json.Marshal(&tt.callback)
+			require.NoError(t, err)
+			var fields map[string]json.RawMessage
+			require.NoError(t, json.Unmarshal(data, &fields))
+			assert.Equal(t, tt.want, string(fields["state"]))
+			assert.Equal(t, rawState, string(tt.callback.RawState))
+		})
+	}
+}
+
 func TestViewClosedck(t *testing.T) {
 	expected := InteractionCallback{
 		Type: InteractionTypeViewClosed,
@@ -221,6 +382,7 @@ func TestViewClosedck(t *testing.T) {
 					),
 				},
 			},
+			AppInstalledTeamID: "T1ABCD2E12",
 		},
 		APIAppID: "A123ABC",
 	}
@@ -256,6 +418,7 @@ func TestViewSubmissionCallback(t *testing.T) {
 							false,
 							false,
 						),
+						nil,
 						&PlainTextInputBlockElement{
 							Type:      "plain_text_input",
 							ActionID:  "ml-value",
@@ -270,6 +433,7 @@ func TestViewSubmissionCallback(t *testing.T) {
 							false,
 							false,
 						),
+						nil,
 						&SelectBlockElement{
 							Type:                         "conversations_select",
 							ActionID:                     "target_select",
@@ -281,20 +445,34 @@ func TestViewSubmissionCallback(t *testing.T) {
 			},
 			State: &ViewState{
 				Values: map[string]map[string]BlockAction{
-					"multi-line": map[string]BlockAction{
-						"ml-value": BlockAction{
+					"multi-line": {
+						"ml-value": {
 							Type:  "plain_text_input",
 							Value: "No onions",
 						},
 					},
-					"target_channel": map[string]BlockAction{
-						"target_select": BlockAction{
+					"target_channel": {
+						"target_select": {
 							Type:  "conversations_select",
 							Value: "C1AB2C3DE",
 						},
 					},
+					"some_datetime": {
+						"value": BlockAction{
+							Type: "datetimepicker",
+							// No selected datetime!
+						},
+					},
+					"some_timepicker": {
+						"value": BlockAction{
+							Type:        "timepicker",
+							InitialTime: "12:00",
+							Timezone:    "Europe/Berlin",
+						},
+					},
 				},
 			},
+			AppInstalledTeamID: "T1ABCD2E12",
 		},
 		ViewSubmissionCallback: ViewSubmissionCallback{
 			Hash: "156663117.cd33ad1f",
@@ -372,11 +550,12 @@ func TestInteractionCallbackJSONMarshalAndUnmarshal(t *testing.T) {
 	}
 
 	cbJSONBytes, err := json.Marshal(cb)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	jsonCB := new(InteractionCallback)
 	err = json.Unmarshal(cbJSONBytes, jsonCB)
-	assert.NoError(t, err)
+	require.NoError(t, err)
+	require.NoError(t, json.Unmarshal(cbJSONBytes, jsonCB))
 
 	assert.Equal(t, cb.Type, jsonCB.Type)
 	assert.Equal(t, cb.Token, jsonCB.Token)
@@ -401,15 +580,16 @@ func TestInteractionCallbackJSONMarshalAndUnmarshal(t *testing.T) {
 	assert.Equal(t, cb.Value, jsonCB.Value)
 	assert.Equal(t, cb.MessageTs, jsonCB.MessageTs)
 	assert.Equal(t, cb.AttachmentID, jsonCB.AttachmentID)
-	assert.Equal(t, len(cb.ActionCallback.AttachmentActions),
-		len(jsonCB.ActionCallback.AttachmentActions))
-	assert.Equal(t, len(cb.ActionCallback.BlockActions),
-		len(jsonCB.ActionCallback.BlockActions))
+	assert.Len(t, jsonCB.ActionCallback.AttachmentActions, len(cb.ActionCallback.AttachmentActions))
+	assert.Len(t, jsonCB.ActionCallback.BlockActions, len(cb.ActionCallback.BlockActions))
 	assert.Equal(t, cb.View.Type, jsonCB.View.Type)
 	assert.Equal(t, cb.View.Title, jsonCB.View.Title)
 	assert.Equal(t, cb.View.Blocks, jsonCB.View.Blocks)
 	assert.Equal(t, cb.DialogSubmissionCallback.State,
 		jsonCB.DialogSubmissionCallback.State)
+	require.NoError(t, json.Unmarshal([]byte(`{"actions":[]}`), jsonCB))
+	assert.Empty(t, jsonCB.ActionCallback.AttachmentActions)
+	assert.Empty(t, jsonCB.ActionCallback.BlockActions)
 }
 
 func TestInteractionCallback_InteractionTypeBlockActions_Unmarshal(t *testing.T) {
@@ -445,14 +625,63 @@ func TestInteractionCallback_InteractionTypeBlockActions_Unmarshal(t *testing.T)
 		}
 	}`)
 	var cb InteractionCallback
-	assert.NoError(t, json.Unmarshal(raw, &cb))
-	assert.Equal(t, cb.State, "")
+	require.NoError(t, json.Unmarshal(raw, &cb))
+	assert.Empty(t, cb.State)
 	assert.Equal(t,
 		cb.BlockActionState.Values["section_block_id"]["multi_convos"].actionType(),
 		ActionType(MultiOptTypeConversations))
 	assert.Equal(t,
-		cb.BlockActionState.Values["section_block_id"]["multi_convos"].SelectedConversations,
-		[]string{"G12345"})
+		[]string{"G12345"}, cb.BlockActionState.Values["section_block_id"]["multi_convos"].SelectedConversations)
+}
+
+func TestInteractionCallback_UserUsername(t *testing.T) {
+	raw := []byte(`{
+		"type": "block_actions",
+		"user": {
+			"id": "UA8RXUSPL",
+			"username": "jtorrance",
+			"name": "jtorrance",
+			"team_id": "T9TK3CUKW"
+		},
+		"actions": []
+	}`)
+	var cb InteractionCallback
+	require.NoError(t, json.Unmarshal(raw, &cb))
+	assert.Equal(t, "UA8RXUSPL", cb.User.ID)
+	assert.Equal(t, "jtorrance", cb.User.Username)
+	assert.Equal(t, "jtorrance", cb.User.Name)
+	assert.Equal(t, "T9TK3CUKW", cb.User.TeamID)
+}
+
+func TestInteractionCallback_BlockSuggestionTeamEnterpriseFields(t *testing.T) {
+	raw := []byte(`{
+		"type": "block_suggestion",
+		"user": {
+			"id": "U123456",
+			"name": "example",
+			"team_id": "T123456"
+		},
+		"team": {
+			"id": "T123456",
+			"name": "example-team",
+			"domain": "example",
+			"enterprise_id": "E123456",
+			"enterprise_name": "Example Enterprise"
+		},
+		"api_app_id": "A123456",
+		"block_id": "enterprise_team",
+		"action_id": "team_lookup",
+		"value": "test"
+	}`)
+
+	var cb InteractionCallback
+	require.NoError(t, json.Unmarshal(raw, &cb))
+	assert.Equal(t, InteractionTypeBlockSuggestion, cb.Type)
+	assert.Equal(t, "T123456", cb.Team.ID)
+	assert.Equal(t, "example-team", cb.Team.Name)
+	assert.Equal(t, "example", cb.Team.Domain)
+	assert.Equal(t, "E123456", cb.Team.EnterpriseID)
+	assert.Equal(t, "Example Enterprise", cb.Team.EnterpriseName)
 }
 
 func TestInteractionCallback_Container_Marshal_And_Unmarshal(t *testing.T) {
@@ -482,18 +711,17 @@ func TestInteractionCallback_Container_Marshal_And_Unmarshal(t *testing.T) {
 			IsEphemeral:  false,
 			IsAppUnfurl:  false,
 		},
-		RawState: json.RawMessage(`{}`),
 	}
 
 	actual := new(InteractionCallback)
 	err := json.Unmarshal(raw, actual)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	assert.Equal(t, expected.Container, actual.Container)
 
 	expectedJSON := []byte(`{"type":"message","view_id":"viewID","message_ts":"messageTS","attachment_id":123,"channel_id":"channelID","is_ephemeral":false,"is_app_unfurl":false}`)
 	actualJSON, err := json.Marshal(actual.Container)
-	assert.NoError(t, err)
-	assert.Equal(t, expectedJSON, actualJSON)
+	require.NoError(t, err)
+	assert.JSONEq(t, string(expectedJSON), string(actualJSON))
 }
 
 func TestInteractionCallback_In_Thread_Container_Marshal_And_Unmarshal(t *testing.T) {
@@ -525,16 +753,101 @@ func TestInteractionCallback_In_Thread_Container_Marshal_And_Unmarshal(t *testin
 			IsEphemeral:  false,
 			IsAppUnfurl:  false,
 		},
-		RawState: json.RawMessage(`{}`),
 	}
 
 	actual := new(InteractionCallback)
 	err := json.Unmarshal(raw, actual)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	assert.Equal(t, expected.Container, actual.Container)
 
 	expectedJSON := []byte(`{"type":"message","view_id":"viewID","message_ts":"messageTS","thread_ts":"threadTS","attachment_id":123,"channel_id":"channelID","is_ephemeral":false,"is_app_unfurl":false}`)
 	actualJSON, err := json.Marshal(actual.Container)
-	assert.NoError(t, err)
-	assert.Equal(t, expectedJSON, actualJSON)
+	require.NoError(t, err)
+	assert.JSONEq(t, string(expectedJSON), string(actualJSON))
+}
+
+func TestInteractionCallback_Parser(t *testing.T) {
+	payload := `{
+		"type": "block_actions",
+		"actions": [
+			{
+				"type": "multi_conversations_select",
+				"action_id": "multi_convos",
+				"block_id": "test123",
+				"selected_conversations": ["G12345"]
+			}
+		],
+		"container": {
+			"type": "view",
+			"view_id": "V12345"
+		},
+		"state": {
+			"values": {
+				"section_block_id": {
+					"multi_convos": {
+						"type": "multi_conversations_select",
+						"selected_conversations": ["G12345"]
+					}
+				},
+				"other_block_id": {
+					"other_action_id": {
+						"type": "plain_text_input",
+						"value": "test123"
+					}
+				}
+			}
+		}
+	}`
+
+	// create request body
+	body := url.Values{}
+	body.Set("payload", payload)
+
+	// create new request
+	req, err := http.NewRequest(http.MethodPost, "http://slack.example.org/interactions", strings.NewReader(body.Encode()))
+	require.NoError(t, err)
+	require.NotNil(t, req)
+
+	// without this header, the parser will not decode the payload
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	// parse payload from request
+	ic, err := InteractionCallbackParse(req)
+	require.NoError(t, err)
+	require.NotNil(t, ic)
+
+	// test parsed InteractionCallback payload
+	assert.Equal(t, InteractionTypeBlockActions, ic.Type)
+
+	require.Len(t, ic.ActionCallback.BlockActions, 1)
+	assert.Equal(t, "multi_convos", ic.ActionCallback.BlockActions[0].ActionID)
+	assert.Equal(t, "test123", ic.ActionCallback.BlockActions[0].BlockID)
+	assert.Equal(t, ic.ActionCallback.BlockActions[0].Type, ActionType(MultiOptTypeConversations))
+	require.Len(t, ic.ActionCallback.BlockActions[0].SelectedConversations, 1)
+	assert.Equal(t, "G12345", ic.ActionCallback.BlockActions[0].SelectedConversations[0])
+
+	assert.Equal(t, "view", ic.Container.Type)
+	assert.Equal(t, "V12345", ic.Container.ViewID)
+
+	assert.Len(t, ic.BlockActionState.Values, 2)
+	assert.Equal(t, ic.BlockActionState.Values["section_block_id"]["multi_convos"].Type, ActionType(MultiOptTypeConversations))
+	require.Len(t, ic.BlockActionState.Values["section_block_id"]["multi_convos"].SelectedConversations, 1)
+	assert.Equal(t, "G12345", ic.BlockActionState.Values["section_block_id"]["multi_convos"].SelectedConversations[0])
+	assert.Equal(t, ic.BlockActionState.Values["other_block_id"]["other_action_id"].Type, ActionType(METPlainTextInput))
+	assert.Equal(t, "test123", ic.BlockActionState.Values["other_block_id"]["other_action_id"].Value)
+}
+
+// A signature check authenticates only the raw POST body. If the "payload"
+// field is missing from that body, parsing must not fall back to the query
+// string: a signed request for one event could otherwise be replayed with
+// an attacker-controlled "payload" smuggled in via the URL.
+// See https://github.com/slack-go/slack/blob/6065d7ddad41ae0fffe26e32a4a9259118df8ba4/interactions.go#L85.
+func TestInteractionCallback_Parser_IgnoresQueryStringPayload(t *testing.T) {
+	req, err := http.NewRequest(http.MethodPost, "http://slack.example.org/interactions?payload=%7B%22type%22%3A%22view_submission%22%7D", strings.NewReader(""))
+	require.NoError(t, err)
+
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	_, err = InteractionCallbackParse(req)
+	assert.EqualError(t, err, "payload is empty")
 }

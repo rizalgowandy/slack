@@ -1,8 +1,9 @@
 package slack
 
 import (
-	"bytes"
 	"encoding/json"
+	"errors"
+	"net/http"
 )
 
 // InteractionType type of interactions
@@ -33,29 +34,29 @@ const (
 
 // InteractionCallback is sent from slack when a user interactions with a button or dialog.
 type InteractionCallback struct {
-	Type            InteractionType         `json:"type"`
-	Token           string                  `json:"token"`
-	CallbackID      string                  `json:"callback_id"`
-	ResponseURL     string                  `json:"response_url"`
-	TriggerID       string                  `json:"trigger_id"`
-	ActionTs        string                  `json:"action_ts"`
-	Team            Team                    `json:"team"`
-	Channel         Channel                 `json:"channel"`
-	User            User                    `json:"user"`
-	OriginalMessage Message                 `json:"original_message"`
-	Message         Message                 `json:"message"`
-	Name            string                  `json:"name"`
-	Value           string                  `json:"value"`
-	MessageTs       string                  `json:"message_ts"`
-	AttachmentID    string                  `json:"attachment_id"`
-	ActionCallback  ActionCallbacks         `json:"actions"`
-	View            View                    `json:"view"`
-	ActionID        string                  `json:"action_id"`
-	APIAppID        string                  `json:"api_app_id"`
-	BlockID         string                  `json:"block_id"`
-	Container       Container               `json:"container"`
-	Enterprise      Enterprise              `json:"enterprise"`
-	WorkflowStep    InteractionWorkflowStep `json:"workflow_step"`
+	Type                InteractionType `json:"type"`
+	Token               string          `json:"token"`
+	CallbackID          string          `json:"callback_id"`
+	ResponseURL         string          `json:"response_url"`
+	TriggerID           string          `json:"trigger_id"`
+	ActionTs            string          `json:"action_ts"`
+	Team                Team            `json:"team"`
+	Channel             Channel         `json:"channel"`
+	User                User            `json:"user"`
+	OriginalMessage     Message         `json:"original_message"`
+	Message             Message         `json:"message"`
+	Name                string          `json:"name"`
+	Value               string          `json:"value"`
+	MessageTs           string          `json:"message_ts"`
+	AttachmentID        string          `json:"attachment_id"`
+	ActionCallback      ActionCallbacks `json:"actions"`
+	View                View            `json:"view"`
+	ActionID            string          `json:"action_id"`
+	APIAppID            string          `json:"api_app_id"`
+	BlockID             string          `json:"block_id"`
+	Container           Container       `json:"container"`
+	Enterprise          Enterprise      `json:"enterprise"`
+	IsEnterpriseInstall bool            `json:"is_enterprise_install"`
 	DialogSubmissionCallback
 	ViewSubmissionCallback
 	ViewClosedCallback
@@ -74,23 +75,45 @@ type BlockActionStates struct {
 	Values map[string]map[string]BlockAction `json:"values"`
 }
 
+// InteractionCallbackParse parses the HTTP form value "payload" from r, unmarshals
+// it as JSON into an InteractionCallback, and returns the result.
+// It returns an error if the payload is missing or cannot be decoded.
+//
+// See https://github.com/slack-go/slack/issues/660 for context.
+func InteractionCallbackParse(r *http.Request) (InteractionCallback, error) {
+	if err := r.ParseForm(); err != nil {
+		return InteractionCallback{}, err
+	}
+	payload := r.PostForm.Get("payload")
+	if len(payload) == 0 {
+		return InteractionCallback{}, errors.New("payload is empty")
+	}
+
+	var ic InteractionCallback
+	if err := json.Unmarshal([]byte(payload), &ic); err != nil {
+		return InteractionCallback{}, err
+	}
+	return ic, nil
+}
+
+// MarshalJSON encodes state according to the callback's interaction type.
 func (ic *InteractionCallback) MarshalJSON() ([]byte, error) {
 	type alias InteractionCallback
 	tmp := alias(*ic)
-	if tmp.Type == InteractionTypeBlockActions {
+	switch tmp.Type {
+	case InteractionTypeBlockActions:
 		if tmp.BlockActionState == nil {
 			tmp.RawState = []byte(`{}`)
 		} else {
-			state, err := json.Marshal(tmp.BlockActionState.Values)
+			state, err := json.Marshal(tmp.BlockActionState)
 			if err != nil {
 				return nil, err
 			}
-			tmp.RawState = []byte(`{"values":` + string(state) + `}`)
+			tmp.RawState = state
 		}
-	} else if ic.Type == InteractionTypeDialogSubmission {
+	case InteractionTypeDialogSubmission:
 		tmp.RawState = []byte(tmp.State)
 	}
-	// Use pointer for go1.7
 	return json.Marshal(&tmp)
 }
 
@@ -136,14 +159,6 @@ type Enterprise struct {
 	Name string `json:"name"`
 }
 
-type InteractionWorkflowStep struct {
-	WorkflowStepEditID string                `json:"workflow_step_edit_id,omitempty"`
-	WorkflowID         string                `json:"workflow_id"`
-	StepID             string                `json:"step_id"`
-	Inputs             *WorkflowStepInputs   `json:"inputs,omitempty"`
-	Outputs            *[]WorkflowStepOutput `json:"outputs,omitempty"`
-}
-
 // ActionCallback is a convenience struct defined to allow dynamic unmarshalling of
 // the "actions" value in Slack's JSON response, which varies depending on block type
 type ActionCallbacks struct {
@@ -151,59 +166,40 @@ type ActionCallbacks struct {
 	BlockActions      []*BlockAction
 }
 
-// MarshalJSON implements the Marshaller interface in order to combine both
-// action callback types back into a single array, like how the api responds.
-// This makes Marshaling and Unmarshaling an InteractionCallback symmetrical
+// MarshalJSON encodes attachment actions followed by block actions as one array.
 func (a ActionCallbacks) MarshalJSON() ([]byte, error) {
-	count := 0
-	length := len(a.AttachmentActions) + len(a.BlockActions)
-	buffer := bytes.NewBufferString("[")
-
-	f := func(obj interface{}) error {
-		js, err := json.Marshal(obj)
-		if err != nil {
-			return err
-		}
-		_, err = buffer.Write(js)
-		if err != nil {
-			return err
-		}
-
-		count++
-		if count < length {
-			_, err = buffer.WriteString(",")
-			return err
-		}
-		return nil
+	switch {
+	case len(a.AttachmentActions) == 0 && len(a.BlockActions) == 0:
+		return []byte("[]"), nil
+	case len(a.AttachmentActions) == 0:
+		return json.Marshal(a.BlockActions)
+	case len(a.BlockActions) == 0:
+		return json.Marshal(a.AttachmentActions)
 	}
 
+	actions := make([]action, 0, len(a.AttachmentActions)+len(a.BlockActions))
 	for _, act := range a.AttachmentActions {
-		err := f(act)
-		if err != nil {
-			return nil, err
-		}
+		actions = append(actions, act)
 	}
 	for _, blk := range a.BlockActions {
-		err := f(blk)
-		if err != nil {
-			return nil, err
-		}
+		actions = append(actions, blk)
 	}
-	buffer.WriteString("]")
-	return buffer.Bytes(), nil
+	return json.Marshal(actions)
 }
 
-// UnmarshalJSON implements the Marshaller interface in order to delegate
-// marshalling and allow for proper type assertion when decoding the response
+// UnmarshalJSON replaces both action collections in a on success. Empty arrays
+// and JSON null clear previous actions. After a decoding error, callers must
+// not rely on its contents, which may be cleared or partially replaced.
 func (a *ActionCallbacks) UnmarshalJSON(data []byte) error {
 	var raw []json.RawMessage
 	err := json.Unmarshal(data, &raw)
 	if err != nil {
 		return err
 	}
+	*a = ActionCallbacks{}
 
 	for _, r := range raw {
-		var obj map[string]interface{}
+		var obj map[string]any
 		err := json.Unmarshal(r, &obj)
 		if err != nil {
 			return err
